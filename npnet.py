@@ -14,30 +14,40 @@ def unpad(x, pad_spec):
 
 class Neuron:
     
-    def __init__(self,ninputs):
-        '''ninputs weights (xavier) and one bias'''
-        self.weights = np.random.normal(0.0,np.sqrt(1.0/ninputs),size=ninputs+1) # Xavier 
-        self.weights[0] = 0.0
+    def __init__(self,ninputs,noutputs):
+        '''Initializes ninputs weights (xavier) and one bias'''
+        self.weights = np.random.normal(0.0,np.sqrt(1.0/ninputs),size=(noutputs,ninputs+1)) # Xavier 
+        self.weights[:,0] = 0.0
         
     def a(self,z):
+        ''' Activation function '''
         raise Exception('Not implemented')
         
     def da_dz(self,a):
+        ''' Activation function w.r.t. z (assumed to depend only on activation a) '''
         raise Exception('Not implemented')
         
-    def activate(self,inputs,activate=True):
-        '''Calculates the output of this neuron with the given input values'''
-        return self.a(np.dot(self.weights[1:],inputs) + self.weights[0])
+    def activate(self,inputs):
+        '''Calculates Z = Weights • Inputs + Bias'''
+        return self.a(np.matmul(self.weights[:,1:],inputs) + self.weights[:,0])
         
     def calculate_grad(self, inputs, input_errors, a, error):
+        '''
+        Calculates the derivative of the loss w.r.t. z using the accumulated error
+            where the error is derivative of loss w.r.t a, the activation
+        '''
         grad = error*self.da_dz(a)
-        input_errors += self.weights[1:]*grad
+        input_errors += np.matmul(self.weights[:,1:].T,grad)
         return grad
         
     def apply_grad(self,inputs,grad,scale=1.0):
-        '''Adjusts the weights (and thershold) by precalculated gradients.'''
-        self.weights[0] -= grad*scale
-        self.weights[1:] -= grad*scale*inputs
+        '''
+        Calculates the derivative of the loss w.r.t. the weights (and bias) and adjusts weights.
+           
+        This is a gradient descent algorithm; could implement other methods here or in subclasses.
+        '''
+        self.weights[:,0] -= scale*grad
+        self.weights[:,1:] -= scale*np.outer(grad,inputs)
             
     def __str__(self):
         if len(self.inputs) > 0:
@@ -49,46 +59,47 @@ class Neuron:
     
 class SigmoidNeuron(Neuron):
     
-    def __init__(self,ninputs):
-        super().__init__(ninputs)
+    def __init__(self,ninputs,noutputs):
+        super().__init__(ninputs,noutputs)
         
     def a(self,z):
-        return 1.0/(1.0+np.exp(-z)) if z > 0 else (1.0 - 1.0/(1.0+np.exp(z)))
+        return 1.0/(1.0+np.exp(-z))
     
     def da_dz(self,a):
         return (1.0 - a)*a
             
 class TanhNeuron(Neuron):
     
-    def __init__(self,ninputs):
-        super().__init__(ninputs)
+    def __init__(self,ninputs,noutputs):
+        super().__init__(ninputs,noutputs)
         
     def a(self,z):
         return np.tanh(z)
     
     def da_dz(self,a):
-        return 1.0 - a**2.0
+        return 1.0 - np.square(a)
     
 class ReLUNeuron(Neuron):
     
-    def __init__(self,ninputs,alpha=0.01):
-        self.weights = np.random.normal(0.0,np.sqrt(2.0/ninputs),size=ninputs+1) # He initilization
-        self.weights[0] = 0.0
+    def __init__(self,ninputs,noutputs,alpha=0.01):
+        ''' Uses He initialization instead of Neuron's default Xavier '''
+        self.weights = np.random.normal(0.0,np.sqrt(2.0/ninputs),size=(noutputs,ninputs+1))
+        self.weights[:,0] = 0.0
         self.alpha = alpha
         
     def a(self,z):
-        '''Calculates the output of this neuron with the given input values'''
-        return z if z > 0 else self.alpha*z
+        return np.where(z > 0,z,self.alpha*z)
     
     def da_dz(self,a):
-        return 1.0 if a > 0 else self.alpha
+        return np.where(a > 0,1.0,self.alpha)
         
 class Instance:
-    def __init__(self, parent, structure, input_shape, output_shape, layer, **kwargs):
-        self.parent = parent
+    '''Represents collections of neurons as an input->output device with list of inputs and outputs'''
+    def __init__(self, parents, structure, input_shapes, output_shapes, layer, **kwargs):
+        self.parents = parents
         self.structure = structure
-        self.input_shape = input_shape
-        self.output_shape = output_shape
+        self.input_shapes = input_shapes
+        self.output_shapes = output_shapes
         self.layer = layer
         self.__dict__.update(kwargs)
     
@@ -99,16 +110,18 @@ class Instance:
         self.structure.load_weights(self,hf)
     
     def __str__(self):
-        return '%s :: %s -> %s'%(type(self.structure).__name__,self.input_shape,self.output_shape)
+        return '%s :: %s -> %s'%(type(self.structure).__name__,self.input_shapes,self.output_shapes)
     
 class Structure:
-    '''Represents collections of neurons as an input->output device'''
-    
-    def __init__(self, output_shape, neuron=ReLUNeuron):
-        self.output_shape = output_shape
-        self.neuron = neuron
+    '''Represents specific types of neuron structures'''
         
     def __call__(self, input_inst=None):
+        '''
+        input_inst represents the input to this structure
+            usually an Instance or list of Instance objects
+            
+        Should return an Instance representing this structures neurons
+        '''
         pass
     
     def save_weights(self,inst,hf):
@@ -120,78 +133,82 @@ class Structure:
             n.weights = hf['neuron%i'%i][:]
         
     def forward(self, inst, inputs):
+        '''
+        inst is the result of a __call__ on this object
+        inputs[parent][slot] is parent `forward` calculation outputs
+        
+        Should return a tensor representing the activated outputs of neurons in this structure
+            with a shape that matches inst.output_shape
+        '''
         pass
     
-    def backward_calc(self, inst, inputs, input_errors, input_error_counts, outputs, error):
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        '''
+        inst is the result of a __call__ on this object
+        inputs[parent][slot] is parent `forward` calculation outputs
+        input_errors[parent][slot] is tensors for accumulating the error on the inputs
+        outputs is the result of the `forward` calculation
+        error is the accumulated error for this neuron
+        
+        This is only called after all errors for the structure have been accumulated.
+        
+        Should return a result[slot] represting the gradients 
+            i.e. the derivative of the loss w.r.t Z
+            where Z = Weights•Inputs + Biases
+        '''
         pass
     
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
+    def backward_apply(self, inst, inputs, grads, scale=1e-2):
+        '''
+        inst is the result of a __call__ on this object
+        inputs[parent][slot] is parent `forward` calculation outputs
+        grads is the result of `backward_calc`
+        scale is the learning rate to scale neuron weight updates by
+        '''
         pass
     
 class Input(Structure):
     '''Structure to inject values into the network'''
     def __init__(self, shape):
-        super().__init__(shape)
+        self.shape = shape
         
-    def __call__(self, input_inst=None):
-        return Instance(input_inst,self,(),self.output_shape,[])
+    def __call__(self):
+        return Instance([],self,[],[self.shape],[])
         
-    def forward(self, inst, inputs):
-        return state.input
-    
-    def backward_calc(self, inst, inputs, input_errors, input_error_counts, outputs, error):
-        return None
-    
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
-        return
-    
-class Output(Structure):
-    '''Structure to extract values from network'''
+class Concatenate(Structure):
+    '''Structure to concatenate two input tensors'''
     def __init__(self):
-        super().__init__(())
-        
-    def __call__(self, input_inst):
-        return Instance(input_inst,self,input_inst.output_shape,input_inst.output_shape,[])
-    
-    def forward(self, inst, inputs):
-        return inputs
-    
-    def backward_calc(self, inst, inputs, input_errors, input_error_counts, outputs, error):
-        input_errors[:] += error
-        input_error_counts += 1
-        return 
-        
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
-        return
+        pass
         
 class Dense(Structure):
     '''Structure that connects all neurons in the specified shape to all neurons of any shaped input'''
-    def __init__(self,shape,neuron=SigmoidNeuron):
-        super().__init__(shape,neuron)
+    def __init__(self,shape,neuron=TanhNeuron):
+        self.shape = shape
+        self.neuron = neuron
         
-    def __call__(self, input_inst):
-        input_shape = input_inst.output_shape
+    def __call__(self, input_inst, input_index=0):
+        self.input_index = input_index
+        input_shape = input_inst.output_shapes[input_index]
         input_size = np.prod(input_shape,dtype=np.int32)
-        output_size = np.prod(self.output_shape,dtype=np.int32)
-        layer = [self.neuron(input_size) for i in range(output_size)]
-        return Instance(input_inst,self,input_shape,self.output_shape,layer)
+        output_size = np.prod(self.shape,dtype=np.int32)
+        layer = [self.neuron(input_size,output_size)]
+        return Instance([input_inst],self,[input_shape],[self.shape],layer)
     
     def forward(self, inst, inputs):
-        inputs = inputs.ravel()
-        outputs = [n.activate(inputs) for n in inst.layer]
-        return np.asarray(outputs).reshape(self.output_shape)
+        inputs = inputs[0][self.input_index].ravel()
+        outputs = inst.layer[0].activate(inputs)
+        return [outputs.reshape(inst.output_shapes[0])]
     
-    def backward_calc(self, inst, inputs, input_errors, input_error_counts, outputs, error):
-        inputs = inputs.ravel()
-        input_errors = input_errors.ravel()
-        outputs = outputs.ravel()
-        error = error.ravel()
-        input_error_counts += len(inst.layer)
-        grads = [n.calculate_grad(inputs,input_errors,o,e) for n,o,e in zip(inst.layer,outputs,error)]
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        inputs = inputs[0][self.input_index].ravel()
+        input_errors = input_errors[0][self.input_index].ravel()
+        outputs = outputs[0].ravel()
+        error = error[0].ravel()
+        grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)]
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
-        inputs = inputs.ravel()
+        inputs = inputs[self.input_index].ravel()
         for n,g in zip(inst.layer,grads):
             n.apply_grad(inputs,g,scale=scale)
     
@@ -201,8 +218,7 @@ class Conv(Structure):
        Works with a surprising variety of input, kernel, and output shapes.'''
     
     def __init__(self, kernel_shape, out_shape=(), kernel_stride=None, pad=False, neuron=ReLUNeuron):
-        output_shape = (-1,)*len(kernel_shape)+tuple(out_shape)
-        super().__init__(output_shape,neuron)
+        self.neuron = neuron
         if kernel_stride is None:
             self.kernel_stride = {elem for elem in np.ones_like(kernel_shape)}
         else:
@@ -213,8 +229,9 @@ class Conv(Structure):
         self.out_size = np.prod(self.out_shape,dtype=np.int32)
         self.pad = pad
         
-    def __call__(self,input_inst):
-        input_shape = input_inst.output_shape
+    def __call__(self,input_inst,input_index=0):
+        self.input_index = input_index
+        input_shape = input_inst.output_shapes[self.input_index]
         if self.pad:
             conv_shape = tuple([in_dim//stride for in_dim, stride in zip(input_shape, self.kernel_stride)])
             pad = tuple([(kernel_dim//2,kernel_dim//2+kernel_dim%2) for kernel_dim in self.kernel_shape])
@@ -224,57 +241,58 @@ class Conv(Structure):
             conv_shape = tuple([(in_dim-kernel_dim)//stride+1 for in_dim, kernel_dim, stride in zip(input_shape, self.kernel_shape, self.kernel_stride)])
             pad = None
         k_in = np.prod(self.kernel_shape+input_shape[len(self.kernel_shape):],dtype=np.int32)
-        layer = [self.neuron(k_in) for i in range(self.out_size)]
+        layer = [self.neuron(k_in,self.out_size)]
         conv_indexing = []
         stride = np.asarray(self.kernel_stride)
         kernel = np.asarray(list(np.ndindex(*self.kernel_shape)))
         #for element in conv (conv_shape), these are the input (input_shape) indices to feed to neurons
         indexer = [tuple(np.asarray([np.asarray(c_index)*stride + ki for ki in kernel]).T) for c_index in np.ndindex(*conv_shape)]
-        return Instance(input_inst, self, input_shape, conv_shape+self.out_shape, layer, conv_shape=conv_shape, indexer=indexer,pad=pad)
+        return Instance([input_inst], self, [input_shape], [conv_shape+self.out_shape], layer, conv_shape=conv_shape, indexer=indexer,pad=pad)
         
     def forward(self, inst, inputs):
         '''inputs is at least dimensionality of kernel'''
-        output = np.empty(np.prod(inst.output_shape,dtype=np.int32))
-        if inst.pad is not None:
-            inputs = np.pad(inputs,inst.pad,constant_values=0)
-        return np.asarray([ 
-                [inst.layer[j].activate(inputs[local_indexes].ravel()) for j in range(self.out_size)] 
-            for local_indexes in inst.indexer]).reshape(inst.output_shape)
+        output = np.empty(np.prod(inst.output_shapes[self.input_index],dtype=np.int32))
+        if inst.pad is None:
+            inputs = inputs[0][self.input_index]
+        else:
+            inputs = np.pad(inputs[0][self.input_index],inst.pad,constant_values=0)
+        return  [ np.asarray([
+                    inst.layer[0].activate(inputs[local_indexes].ravel()) for local_indexes in inst.indexer
+                ]).reshape(inst.output_shapes[0]) ]
             
-    def backward_calc(self, inst, inputs, input_errors, input_error_counts, outputs, error):
-        ''' This computes an average gradient for the conv kernel '''
-        if inst.pad is not None:
-            inputs = np.pad(inputs,inst.pad,constant_values=0)
-            prev_errors = input_errors
-            input_errors = np.pad(input_errors,inst.pad,constant_values=0)
-        conv_outputs = outputs.ravel()
-        conv_error = error.ravel()
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        if inst.pad is None:
+            inputs = inputs[0][self.input_index]
+            input_errors = input_errors[0][self.input_index]
+        else:
+            inputs = np.pad(inputs[0][self.input_index],inst.pad,constant_values=0)
+            prev_errors = input_errors[0][self.input_index]
+            input_errors = np.pad(input_errors[0][self.input_index],inst.pad,constant_values=0)
+        conv_outputs = outputs[0].ravel()
+        conv_error = error[0].ravel()
+        grads = []
         for i,local_indexes in enumerate(inst.indexer):
             local = inputs[local_indexes].ravel()
             local_errors = input_errors[local_indexes].ravel()
-            local_error_counts = input_errors[local_indexes].ravel()
             output = conv_outputs[i*self.out_size:(i+1)*self.out_size]
             error = conv_error[i*self.out_size:(i+1)*self.out_size]
-            local_error_counts[:] += len(inst.layer)
-            if i == 0:
-                grads = [n.calculate_grad(local,local_errors,o,e) for n,o,e in zip(inst.layer,output,error)]
-            else:
-                grads = [n.calculate_grad(local,local_errors,o,e)+g for n,o,e,g in zip(inst.layer,output,error,grads)]
+            grads.append(inst.layer[0].calculate_grad(local,local_errors,output,error))
         if inst.pad is not None:
             prev_errors[:] = unpad(input_errors,inst.pad)
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
-        ''' This applies a shift for each input case according to the average gradient. '''
-        for i,local_indexes in enumerate(inst.indexer):
-            local = inputs[local_indexes].ravel()
-            for n,g in zip(inst.layer,grads):
-                n.apply_grad(local,g,scale=scale)
+        for local_indexes,g in zip(inst.indexer,grads):
+            local = inputs[self.input_index][local_indexes].ravel()
+            inst.layer[0].apply_grad(local,g,scale=scale)
             
 class System:
-    '''Manages a neural network. Create neurons in the network with add_neuron. 
-       Structures will call add_neuron when their construct methods are called.
-       Contains logic for forward and back propagation, where neurons calculate their own errors.'''
+    '''
+    Manages a neural network represented as a a collection of connected structures 
+        with a list of input and output structures.
+        
+    Contains logic for forward and back propagation, where neurons calculate their own errors.
+    '''
     
     def __init__(self,inputs=[],outputs=[]):
         self.inputs = inputs # input structures 
@@ -283,7 +301,9 @@ class System:
         parts = [] # sequentially stores all instances in network
         children_indexes = [] # indexes of child instances in parts for each instance in parts
         parents_indexes = [] # indexes of parent instances in parts for each instance in parts
-        for child in self.outputs: # iterate over outputs and walk up tree
+            
+        stack = deque()
+        for child in self.outputs: # iterate over outputs to walk up tree
             if child not in parts:
                 child_index = len(parts)
                 parts.append(child)
@@ -291,19 +311,23 @@ class System:
                 parents_indexes.append([])
             else:
                 child_index = parts.index(child)
-            while (parent := child.parent): # What about multiple parents?
-                print(parent,'=>',child)
-                if parent not in parts:
-                    index = len(parts)
-                    parts.append(parent)
-                    children_indexes.append([])
-                    parents_indexes.append([])
-                else:
-                    index = parts.index(parent)
-                parents_indexes[child_index].append(index)
-                children_indexes[index].append(child_index)
-                child = parent
-                child_index = index
+            for parent in child.parents:
+                stack.append((child_index,child,parent))
+        while len(stack) > 0: 
+            child_index,child,parent = stack.pop()
+            print(parent,'=>',child)
+            if parent not in parts:
+                index = len(parts)
+                parts.append(parent)
+                children_indexes.append([])
+                parents_indexes.append([])
+            else:
+                index = parts.index(parent)
+            parents_indexes[child_index].append(index)
+            children_indexes[index].append(child_index)
+            if parent.parents is not None:
+                for grandparent in parent.parents:
+                    stack.append((index,parent,grandparent))
                 
         self.input_indexes = np.asarray([parts.index(input) for input in self.inputs],dtype=np.int32) # indexes of input structures
         self.output_indexes = np.asarray([parts.index(output) for output in self.outputs],dtype=np.int32) # indexes of output structures
@@ -356,27 +380,32 @@ class System:
         for index in recompute_indexes:
             instance = self.parts[index]
             inputs = state[self.parents_indexes[index]]
-            outputs = instance.structure.forward(instance,inputs[0]) #What if there are multiple inputs!?
-            if np.any(outputs != state[index]):
+            outputs = instance.structure.forward(instance,inputs)
+            if state[index] is None or np.any(outputs != state[index]):
                 state_changed[index] = True
                 state[index] = outputs
         return state_changed
     
     def guess(self,inputs,return_state=False):
         changed = np.zeros(len(self.parts),dtype=np.bool)
-        state = np.asarray([np.zeros(p.output_shape) for p in self.parts],dtype=object)
+        state = np.asarray([[None for s in p.output_shapes] for p in self.parts],dtype=object)
         changed[self.input_indexes] = True
-        state[self.input_indexes] = inputs
+        
+        for input_index,input in zip(self.input_indexes,inputs):
+            #assume inputs are slot 0 (no multi-input input structures)
+            state[input_index][0] = input
     
         steps = 0
         while np.count_nonzero(changed) > 0:
             changed = self._step(changed,state)
             steps = steps + 1
             
+        outputs = [state[index][0] for index in self.output_indexes]
+            
         if return_state:
-            return state[self.output_indexes],state
+            return outputs,state
         else:
-            return state[self.output_indexes]
+            return outputs
     
     def learn(self,final_state,true_outputs,scale=1.0,batch=False,loss='quad'):
         grads = self.calculate_grads(final_state,true_outputs,loss=loss)
@@ -386,19 +415,19 @@ class System:
             self.apply_grads(final_state,grads,batch=False,scale=scale)
     
     def calculate_grads(self,final_state,true_outputs,loss='quad'):
-        errors = np.asarray([np.zeros(p.output_shape) for p in self.parts],dtype=object)
-        error_counts = np.asarray([np.zeros(p.output_shape,dtype=np.int32) for p in self.parts],dtype=object)
+        errors = np.asarray([[np.zeros(s) for s in p.output_shapes] for p in self.parts],dtype=object)
         grads = np.asarray([None for p in self.parts],dtype=object)
         if loss == 'quad':
-            errors[self.output_indexes] = [final-true 
-                                           for true,final in zip(true_outputs,final_state[self.output_indexes])]
+            dloss_da = [final[0]-true for true,final in zip(true_outputs,final_state[self.output_indexes])]
         elif loss == 'ce': 
-            errors[self.output_indexes] = [true*(final-1)+(1-true)*final 
-                                           for true,final in zip(true_outputs,final_state[self.output_indexes])]
+            dloss_da = [true*(final[0]-1)+(1-true)*final[0] for true,final in zip(true_outputs,final_state[self.output_indexes])]
         else:
             raise Exception('Loss function ' + loss + ' not implemented')
-        error_counts[self.output_indexes] = 1
-        
+            
+        for output_index,output_loss in zip(self.output_indexes,dloss_da):
+            #assume outputs are slot 0 (no multi-output output structures)
+            errors[output_index][0] = output_loss
+         
         not_propagated_mask = np.ones(len(self.parts),dtype=np.bool)
         not_pending_mask = np.ones(len(self.parts),dtype=np.bool)
         
@@ -407,18 +436,15 @@ class System:
             index = stack.popleft()
             not_pending_mask[index] = True
             child_indexes = self.children_indexes[index]
-            if np.any(not_propagated_mask[child_indexes]) or np.any(error_counts[index] < 1):
-                continue
+            if np.any(not_propagated_mask[child_indexes]):
+                continue # What about loops?
             parent_indexes = self.parents_indexes[index]
-            inputs = final_state[parent_indexes] if len(parent_indexes) else None #What if there are multiple inputs!?
-            input_errors = errors[parent_indexes] if len(parent_indexes) else None #What if there are multiple inputs!?
-            input_error_counts = error_counts[parent_indexes][0] if len(parent_indexes) else None
+            inputs = final_state[parent_indexes] if len(parent_indexes) else None
+            input_errors = errors[parent_indexes] if len(parent_indexes) else None
             outputs = final_state[index]
             instance = self.parts[index]
-            # What about loops?
-            grads[index] = instance.structure.backward_calc(instance, inputs, input_errors, input_error_counts, outputs, errors[index])
+            grads[index] = instance.structure.backward_calc(instance, inputs, input_errors, outputs, errors[index])
             not_propagated_mask[index] = False
-            # Add parents to propagation if not already pending calculation
             queue_up = not_pending_mask[parent_indexes]
             queue_up = parent_indexes[queue_up]
             not_pending_mask[queue_up] = False
