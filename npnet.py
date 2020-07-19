@@ -63,7 +63,7 @@ class SigmoidNeuron(Neuron):
         super().__init__(ninputs,noutputs)
         
     def a(self,z):
-        return 1.0/(1.0+np.exp(-z))
+        return sigmoid(z)
     
     def da_dz(self,a):
         return (1.0 - a)*a
@@ -179,7 +179,94 @@ class Concatenate(Structure):
     '''Structure to concatenate two input tensors'''
     def __init__(self):
         pass
+    
+    def __call__(self,input_inst_list, input_indexs=None):
+        if input_indexs is None:
+            input_indexs = np.zeros_like(input_inst_list)
+        input_shapes = [inst.output_shapes[index] for inst,index in zip(input_inst_list,input_indexs)]
+        lengths = [shape[0] for shape in input_shapes]
+        splitter = np.cumsum(lengths)[:-1]
+        if len(input_shape[0]) > 1:
+            inner = [shape[1:] for shape in input_shapes]
+            assert len(set(inner)) == 1, "Inner shapes of concatenate must match"
+            inner = inner[0]
+        else:
+            inner = ()
+        if np.any(lengths < 0):
+            length = -1
+        else:
+            length = np.sum(lengths)
+        output_shape = (length,)+inner
+        return Instance(input_inst_list,self,input_shapes,[output_shape],[],input_indexs=input_indexs,splitter=splitter)
+    
+    def forward(self, inst, inputs):
+        inputs = [input[index] for input,index in zip(inputs,inst.input_indexs)]
+        return np.concatenate(outputs)
         
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        input_errors = [error[index] for error,index in zip(input_errors,inst.input_indexs)]
+        output_errors = np.split(error,splitter)
+        for i,o in zip(input_errors,output_errors):
+            i[:] = o
+        
+        
+class Pointwise(Structure):
+    '''Structure to concatenate two input tensors'''
+    def __init__(self):
+        pass
+    
+    def __call__(self,input_inst_list, input_indexes=None):
+        if input_indexes is None:
+            input_indexes = np.zeros_like(input_inst_list)
+        input_shapes = [inst.output_shapes[index] for inst,index in zip(input_inst_list,input_indexes)]
+        assert len(set(input_shapes)) == 1, "Inner shapes of concatenate must match"
+        output_shape = input_shapes[0]
+        return Instance(input_inst_list,self,input_shapes,[output_shape],[],input_indexes=input_indexes)
+    
+    def forward(self, inst, inputs):
+        inputs = [inp[index] for inp,index in zip(inputs,inst.input_indexes)]
+        return [self.oper(*inputs)]
+        
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        inputs = [inp[index] for inp,index in zip(inputs,inst.input_indexes)]
+        input_errors = [err[index] for err,index in zip(input_errors,inst.input_indexes)]
+        inv_errors = self.oper_err(error[0],*inputs)
+        for i,inv in zip(input_errors,inv_errors):
+            i[:] = inv
+            
+class Add(Pointwise):
+    def __init__(self):
+        pass
+    
+    def oper(self,a,b):
+        return a+b
+    
+    def oper_err(self,err,a,b):
+        return err,err
+        
+class Mul(Pointwise):
+    def __init__(self):
+        pass
+    
+    def oper(self,a,b):
+        return a*b
+    
+    def oper_err(self,err,a,b):
+        return b*err,a*err
+    
+class ResWrap(Structure):
+    def __init__(self,cell,input_index=0,output_index=0):
+        self.cell = cell
+        self.input_index = input_index
+        self.output_index = output_index
+        
+    def __call__(self, input_inst, *args, **kwargs):
+        shape = input_inst.output_shapes[self.input_index]
+        cell_inst = self.cell(input_inst)
+        output_inst = Add()([input_inst,cell_inst],input_indexes=[self.input_index,self.output_index])
+        return output_inst
+        
+    
 class Dense(Structure):
     '''Structure that connects all neurons in the specified shape to all neurons of any shaped input'''
     def __init__(self,shape,neuron=TanhNeuron):
@@ -187,28 +274,27 @@ class Dense(Structure):
         self.neuron = neuron
         
     def __call__(self, input_inst, input_index=0):
-        self.input_index = input_index
         input_shape = input_inst.output_shapes[input_index]
         input_size = np.prod(input_shape,dtype=np.int32)
         output_size = np.prod(self.shape,dtype=np.int32)
         layer = [self.neuron(input_size,output_size)]
-        return Instance([input_inst],self,[input_shape],[self.shape],layer)
+        return Instance([input_inst],self,[input_shape],[self.shape],layer,input_index=input_index)
     
     def forward(self, inst, inputs):
-        inputs = inputs[0][self.input_index].ravel()
+        inputs = inputs[0][inst.input_index].ravel()
         outputs = inst.layer[0].activate(inputs)
         return [outputs.reshape(inst.output_shapes[0])]
     
     def backward_calc(self, inst, inputs, input_errors, outputs, error):
-        inputs = inputs[0][self.input_index].ravel()
-        input_errors = input_errors[0][self.input_index].ravel()
+        inputs = inputs[inst.input_index][inst.input_index].ravel()
+        input_errors = input_errors[inst.input_index][inst.input_index].ravel()
         outputs = outputs[0].ravel()
         error = error[0].ravel()
         grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)]
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
-        inputs = inputs[self.input_index].ravel()
+        inputs = inputs[inst.input_index].ravel()
         for n,g in zip(inst.layer,grads):
             n.apply_grad(inputs,g,scale=scale)
     
@@ -230,8 +316,7 @@ class Conv(Structure):
         self.pad = pad
         
     def __call__(self,input_inst,input_index=0):
-        self.input_index = input_index
-        input_shape = input_inst.output_shapes[self.input_index]
+        input_shape = input_inst.output_shapes[input_index]
         if self.pad:
             conv_shape = tuple([in_dim//stride for in_dim, stride in zip(input_shape, self.kernel_stride)])
             pad = tuple([(kernel_dim//2,kernel_dim//2+kernel_dim%2) for kernel_dim in self.kernel_shape])
@@ -247,27 +332,27 @@ class Conv(Structure):
         kernel = np.asarray(list(np.ndindex(*self.kernel_shape)))
         #for element in conv (conv_shape), these are the input (input_shape) indices to feed to neurons
         indexer = [tuple(np.asarray([np.asarray(c_index)*stride + ki for ki in kernel]).T) for c_index in np.ndindex(*conv_shape)]
-        return Instance([input_inst], self, [input_shape], [conv_shape+self.out_shape], layer, conv_shape=conv_shape, indexer=indexer,pad=pad)
+        return Instance([input_inst], self, [input_shape], [conv_shape+self.out_shape], layer, conv_shape=conv_shape, indexer=indexer,pad=pad,input_index=input_index)
         
     def forward(self, inst, inputs):
         '''inputs is at least dimensionality of kernel'''
         output = np.empty(np.prod(inst.output_shapes[self.input_index],dtype=np.int32))
         if inst.pad is None:
-            inputs = inputs[0][self.input_index]
+            inputs = inputs[0][inst.input_index]
         else:
-            inputs = np.pad(inputs[0][self.input_index],inst.pad,constant_values=0)
+            inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
         return  [ np.asarray([
                     inst.layer[0].activate(inputs[local_indexes].ravel()) for local_indexes in inst.indexer
                 ]).reshape(inst.output_shapes[0]) ]
             
     def backward_calc(self, inst, inputs, input_errors, outputs, error):
         if inst.pad is None:
-            inputs = inputs[0][self.input_index]
-            input_errors = input_errors[0][self.input_index]
+            inputs = inputs[0][inst.input_index]
+            input_errors = input_errors[0][inst.input_index]
         else:
-            inputs = np.pad(inputs[0][self.input_index],inst.pad,constant_values=0)
-            prev_errors = input_errors[0][self.input_index]
-            input_errors = np.pad(input_errors[0][self.input_index],inst.pad,constant_values=0)
+            inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
+            prev_errors = input_errors[0][inst.input_index]
+            input_errors = np.pad(input_errors[0][inst.input_index],inst.pad,constant_values=0)
         conv_outputs = outputs[0].ravel()
         conv_error = error[0].ravel()
         grads = []
@@ -283,7 +368,7 @@ class Conv(Structure):
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
         for local_indexes,g in zip(inst.indexer,grads):
-            local = inputs[self.input_index][local_indexes].ravel()
+            local = inputs[inst.input_index][local_indexes].ravel()
             inst.layer[0].apply_grad(local,g,scale=scale)
             
 class System:
@@ -314,8 +399,7 @@ class System:
             for parent in child.parents:
                 stack.append((child_index,child,parent))
         while len(stack) > 0: 
-            child_index,child,parent = stack.pop()
-            print(parent,'=>',child)
+            child_index,child,parent = stack.popleft()
             if parent not in parts:
                 index = len(parts)
                 parts.append(parent)
@@ -323,6 +407,9 @@ class System:
                 parents_indexes.append([])
             else:
                 index = parts.index(parent)
+                if child_index in children_indexes[index]:
+                    continue #already mapped this branch
+            print(parent,'=>',child,'idx:',child_index)
             parents_indexes[child_index].append(index)
             children_indexes[index].append(child_index)
             if parent.parents is not None:
@@ -380,20 +467,22 @@ class System:
         for index in recompute_indexes:
             instance = self.parts[index]
             inputs = state[self.parents_indexes[index]]
+            if np.any(inputs == None): 
+                continue #not ready yet
             outputs = instance.structure.forward(instance,inputs)
-            if state[index] is None or np.any(outputs != state[index]):
-                state_changed[index] = True
-                state[index] = outputs
+            #what about loops...
+            state_changed[index] = True
+            state[index] = outputs
         return state_changed
     
     def guess(self,inputs,return_state=False):
         changed = np.zeros(len(self.parts),dtype=np.bool)
-        state = np.asarray([[None for s in p.output_shapes] for p in self.parts],dtype=object)
+        state = np.asarray([None for p in self.parts],dtype=object)
         changed[self.input_indexes] = True
         
         for input_index,input in zip(self.input_indexes,inputs):
             #assume inputs are slot 0 (no multi-input input structures)
-            state[input_index][0] = input
+            state[input_index] = [input]
     
         steps = 0
         while np.count_nonzero(changed) > 0:
