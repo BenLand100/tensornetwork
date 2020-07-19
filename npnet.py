@@ -12,31 +12,35 @@ def unpad(x, pad_spec):
         slices.append(slice(a, b))
     return x[tuple(slices)]
 
-class Neuron:
+class NeuronNet:
+    '''A collection of Neurons representing noutputs with the same input inputs.'''
     
-    def __init__(self,ninputs,noutputs):
-        '''Initializes ninputs weights (xavier) and one bias'''
-        self.weights = np.random.normal(0.0,np.sqrt(1.0/ninputs),size=(noutputs,ninputs+1)) # Xavier 
-        self.weights[:,0] = 0.0
-        
-    def a(self,z):
-        ''' Activation function '''
-        raise Exception('Not implemented')
-        
-    def da_dz(self,a):
-        ''' Activation function w.r.t. z (assumed to depend only on activation a) '''
-        raise Exception('Not implemented')
+    def __init__(self,ninputs,noutputs,activation,init=None):
+        '''Initializes ninputs weights and one bias, according to init.'''
+        self.activation = activation
+        if init is None:
+            init = 'xavier' if type(activation) is not ReLU else 'he'
+        if init is 'none':
+            self.weights = None
+        elif init is 'xavier':
+            self.weights = np.random.normal(0.0,np.sqrt(1.0/ninputs),size=(noutputs,ninputs+1)) # Xavier 
+            self.weights[:,0] = 0.0
+        elif init is 'he':
+            self.weights = np.random.normal(0.0,np.sqrt(2.0/ninputs),size=(noutputs,ninputs+1)) # He
+            self.weights[:,0] = 0.0
+        elif type(init) is np.ndarray:
+            self.weights = init
         
     def activate(self,inputs):
-        '''Calculates Z = Weights • Inputs + Bias'''
-        return self.a(np.matmul(self.weights[:,1:],inputs) + self.weights[:,0])
+        '''Calculates A = Activation(Weights • Inputs + Bias)'''
+        return self.activation.a(np.matmul(self.weights[:,1:],inputs) + self.weights[:,0])
         
     def calculate_grad(self, inputs, input_errors, a, error):
         '''
         Calculates the derivative of the loss w.r.t. z using the accumulated error
             where the error is derivative of loss w.r.t a, the activation
         '''
-        grad = error*self.da_dz(a)
+        grad = error*self.activation.da_dz(a)
         input_errors += np.matmul(self.weights[:,1:].T,grad)
         return grad
         
@@ -51,40 +55,75 @@ class Neuron:
             
     def __str__(self):
         if len(self.inputs) > 0:
-            inputs = ['(I[i] * %0.4f)'%(input,weight) for i,weight in enumerate(self.weights[1:])]
+            inputs = ['(I[i] * %0.4f)'%(i,weight) for i,weight in enumerate(self.weights[1:])]
             inputs = ' + '.join(inputs)
             return 'O[I] = A[%s + %0.4f]'%(self.index,inputs,self.weights[0])
         else:
             return 'O[I] = input'%self.index
-    
-class SigmoidNeuron(Neuron):
-    
-    def __init__(self,ninputs,noutputs):
-        super().__init__(ninputs,noutputs)
         
+class ConstantNet(NeuronNet):
+    '''A NeuronNet that is not adjusted by backpropagation.'''
+    def __init__(*args,**kwargs):
+        super().__init__(*args,**kwargs)
+    
+    def calculate_grad(self, inputs, input_errors, a, error):
+        return None
+        
+    def apply_grad(self,inputs,grad,scale=1.0):
+        pass
+    
+class ActivationNet(NeuronNet):
+    '''A NeuronNet that only does activation (constant diagonal weights 1.0).'''
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,init=np.asarray([],dtype=np.float64),**kwargs)
+        
+    def activate(self,inputs):
+        '''Calculates A = Activation(Inputs)'''
+        return self.activation.a(inputs)
+    
+    def calculate_grad(self, inputs, input_errors, a, error):
+        return None
+        
+    def apply_grad(self,inputs,grad,scale=1.0):
+        pass
+    
+class Activation:
+    '''Base class for activation functions'''
+    def a(self,z):
+        ''' Activation function '''
+        raise Exception('Not implemented')
+        
+    def da_dz(self,a):
+        ''' Activation function w.r.t. z (assumed to depend only on activation a) '''
+        raise Exception('Not implemented')
+    
+class Linear(Activation):
+    
+    def a(self,z):
+        return z
+    
+    def da_dz(self,a):
+        return 1.0
+    
+class Sigmoid(Activation):
+    
     def a(self,z):
         return sigmoid(z)
     
     def da_dz(self,a):
         return (1.0 - a)*a
             
-class TanhNeuron(Neuron):
+class Tanh(Activation):
     
-    def __init__(self,ninputs,noutputs):
-        super().__init__(ninputs,noutputs)
-        
     def a(self,z):
         return np.tanh(z)
     
     def da_dz(self,a):
         return 1.0 - np.square(a)
     
-class ReLUNeuron(Neuron):
+class ReLU(Activation):
     
-    def __init__(self,ninputs,noutputs,alpha=0.01):
-        ''' Uses He initialization instead of Neuron's default Xavier '''
-        self.weights = np.random.normal(0.0,np.sqrt(2.0/ninputs),size=(noutputs,ninputs+1))
-        self.weights[:,0] = 0.0
+    def __init__(self,alpha=0.01):
         self.alpha = alpha
         
     def a(self,z):
@@ -255,29 +294,49 @@ class Mul(Pointwise):
         return b*err,a*err
     
 class ResWrap(Structure):
-    def __init__(self,cell,input_index=0,output_index=0):
+    def __init__(self,cell,output_index=0):
         self.cell = cell
-        self.input_index = input_index
         self.output_index = output_index
         
-    def __call__(self, input_inst, *args, **kwargs):
-        shape = input_inst.output_shapes[self.input_index]
-        cell_inst = self.cell(input_inst)
-        output_inst = Add()([input_inst,cell_inst],input_indexes=[self.input_index,self.output_index])
-        return output_inst
+    def __call__(self, input_inst, input_index=0):
+        shape = input_inst.output_shapes[input_index]
+        cell_inst = self.cell(input_inst,input_index=input_index)
+        weights_inst = Dense(shape,activation=Linear())(cell_inst,input_index=self.output_index)
+        add_inst = Add()([input_inst,weights_inst],input_indexes=[input_index,0])
+        size = np.prod(shape)
+        layer = [ActivationNet(size,size,activation=self.cell.activation)]
+        return Instance([add_inst],self,[shape],[shape],layer,input_index=input_index,
+                        cell_inst=cell_inst,weights_inst=weights_inst,add_inst=add_inst)
         
+    def forward(self, inst, inputs):
+        inputs = inputs[0][inst.input_index].ravel()
+        outputs = inst.layer[0].activate(inputs)
+        return [outputs.reshape(inst.output_shapes[0])]
     
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        inputs = inputs[0][inst.input_index].ravel()
+        input_errors = input_errors[0][inst.input_index].ravel()
+        outputs = outputs[0].ravel()
+        error = error[0].ravel()
+        grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)]
+        return grads
+        
+    def backward_apply(self, inst, inputs, grads, scale=1.0):
+        inputs = inputs[inst.input_index].ravel()
+        for n,g in zip(inst.layer,grads):
+            n.apply_grad(inputs,g,scale=scale)
+            
 class Dense(Structure):
     '''Structure that connects all neurons in the specified shape to all neurons of any shaped input'''
-    def __init__(self,shape,neuron=TanhNeuron):
+    def __init__(self,shape,activation=Tanh()):
         self.shape = shape
-        self.neuron = neuron
+        self.activation = activation
         
     def __call__(self, input_inst, input_index=0):
         input_shape = input_inst.output_shapes[input_index]
         input_size = np.prod(input_shape,dtype=np.int32)
         output_size = np.prod(self.shape,dtype=np.int32)
-        layer = [self.neuron(input_size,output_size)]
+        layer = [NeuronNet(input_size,output_size,activation=self.activation)]
         return Instance([input_inst],self,[input_shape],[self.shape],layer,input_index=input_index)
     
     def forward(self, inst, inputs):
@@ -286,8 +345,8 @@ class Dense(Structure):
         return [outputs.reshape(inst.output_shapes[0])]
     
     def backward_calc(self, inst, inputs, input_errors, outputs, error):
-        inputs = inputs[inst.input_index][inst.input_index].ravel()
-        input_errors = input_errors[inst.input_index][inst.input_index].ravel()
+        inputs = inputs[0][inst.input_index].ravel()
+        input_errors = input_errors[0][inst.input_index].ravel()
         outputs = outputs[0].ravel()
         error = error[0].ravel()
         grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)]
@@ -303,8 +362,8 @@ class Conv(Structure):
        Can use multiple kernels to add a dimension to the output if out_shape is specified.
        Works with a surprising variety of input, kernel, and output shapes.'''
     
-    def __init__(self, kernel_shape, out_shape=(), kernel_stride=None, pad=False, neuron=ReLUNeuron):
-        self.neuron = neuron
+    def __init__(self, kernel_shape, out_shape=(), kernel_stride=None, pad=False, activation=ReLU()):
+        self.activation = activation
         if kernel_stride is None:
             self.kernel_stride = {elem for elem in np.ones_like(kernel_shape)}
         else:
@@ -326,7 +385,7 @@ class Conv(Structure):
             conv_shape = tuple([(in_dim-kernel_dim)//stride+1 for in_dim, kernel_dim, stride in zip(input_shape, self.kernel_shape, self.kernel_stride)])
             pad = None
         k_in = np.prod(self.kernel_shape+input_shape[len(self.kernel_shape):],dtype=np.int32)
-        layer = [self.neuron(k_in,self.out_size)]
+        layer = [NeuronNet(k_in,self.out_size,activation=self.activation)]
         conv_indexing = []
         stride = np.asarray(self.kernel_stride)
         kernel = np.asarray(list(np.ndindex(*self.kernel_shape)))
@@ -336,7 +395,7 @@ class Conv(Structure):
         
     def forward(self, inst, inputs):
         '''inputs is at least dimensionality of kernel'''
-        output = np.empty(np.prod(inst.output_shapes[self.input_index],dtype=np.int32))
+        output = np.empty(np.prod(inst.output_shapes[inst.input_index],dtype=np.int32))
         if inst.pad is None:
             inputs = inputs[0][inst.input_index]
         else:
@@ -409,7 +468,7 @@ class System:
                 index = parts.index(parent)
                 if child_index in children_indexes[index]:
                     continue #already mapped this branch
-            print(parent,'=>',child,'idx:',child_index)
+            print(parent,'idx:',index,'=>',child,'idx:',child_index)
             parents_indexes[child_index].append(index)
             children_indexes[index].append(child_index)
             if parent.parents is not None:
