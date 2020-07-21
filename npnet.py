@@ -1,5 +1,6 @@
 import h5py
 import numpy as np
+import scipy.ndimage as ndi
 from collections import deque
 
 def sigmoid(x):
@@ -20,20 +21,21 @@ class NeuronNet:
         self.activation = activation
         if init is None:
             init = 'xavier' if type(activation) is not ReLU else 'he'
-        if init is 'none':
+        if init == 'none':
             self.weights = None
-        elif init is 'xavier':
-            self.weights = np.random.normal(0.0,np.sqrt(1.0/ninputs),size=(noutputs,ninputs+1)) # Xavier 
-            self.weights[:,0] = 0.0
-        elif init is 'he':
-            self.weights = np.random.normal(0.0,np.sqrt(2.0/ninputs),size=(noutputs,ninputs+1)) # He
-            self.weights[:,0] = 0.0
-        elif type(init) is np.ndarray:
-            self.weights = init
+            self.biases = None
+        elif init == 'xavier':
+            self.weights = np.random.normal(0.0,np.sqrt(1.0/ninputs),size=(noutputs,ninputs)) # Xavier 
+            self.biases = np.zeros(noutputs)
+        elif init == 'he':
+            self.weights = np.random.normal(0.0,np.sqrt(2.0/ninputs),size=(noutputs,ninputs)) # He
+            self.biases = np.zeros(noutputs)
+        else:
+            self.weights,self.biases = init
         
     def activate(self,inputs):
         '''Calculates A = Activation(Weights • Inputs + Bias)'''
-        return self.activation.a(np.matmul(self.weights[:,1:],inputs) + self.weights[:,0])
+        return self.activation.a(np.matmul(self.weights,inputs) + self.biases)
         
     def calculate_grad(self, inputs, input_errors, a, error):
         '''
@@ -41,7 +43,7 @@ class NeuronNet:
             where the error is derivative of loss w.r.t a, the activation
         '''
         grad = error*self.activation.da_dz(a)
-        input_errors += np.matmul(self.weights[:,1:].T,grad)
+        input_errors += np.matmul(self.weights.T,grad)
         return grad
         
     def apply_grad(self,inputs,grad,scale=1.0):
@@ -50,17 +52,52 @@ class NeuronNet:
            
         This is a gradient descent algorithm; could implement other methods here or in subclasses.
         '''
-        self.weights[:,0] -= scale*grad
-        self.weights[:,1:] -= scale*np.outer(grad,inputs)
-            
-    def __str__(self):
-        if len(self.inputs) > 0:
-            inputs = ['(I[i] * %0.4f)'%(i,weight) for i,weight in enumerate(self.weights[1:])]
-            inputs = ' + '.join(inputs)
-            return 'O[I] = A[%s + %0.4f]'%(self.index,inputs,self.weights[0])
-        else:
-            return 'O[I] = input'%self.index
+        self.biases -= scale*grad
+        self.weights -= scale*np.outer(grad,inputs)
+    
+class ConvNet(NeuronNet):
+    '''A NeuronNet that implements 2D convolution of a kernel.
+       FIXME simplify logic restriction to [i,j,m] inputs and [i,j,n] outputs instead of [i,j,...] -> [i,j,...]'''
+    def __init__(self,kernel_shape,input_size,output_size,activation,init=None):
+        self.input_size = input_size
+        self.output_size = output_size
+        kernel_size = np.prod(kernel_shape,dtype=np.int64)
+        local_input_size = kernel_size*input_size
+        local_output_size = output_size
+        super().__init__(local_input_size,local_output_size,activation=activation,init=init)
+        #requires init not to be None, or reshape in every activate...
+        self.local_weights = self.weights.reshape((output_size,)+kernel_shape+(input_size,))
         
+    def activate(self,inputs):
+        '''Assumes inputs is at least 2D and convolves the weights over the first two dimensions'''
+        conv = [np.sum(ndi.convolve(inputs,w,mode='constant'),axis=2)+b 
+                for w,b in zip(self.local_weights,self.biases)]
+        conv = np.moveaxis(conv, [-2,-1], [0,1])
+        return self.activation.a(conv)
+        
+    def calculate_grad(self, inputs, input_errors, a, error):
+        '''
+        Calculates the derivative of the loss w.r.t. z using the accumulated error
+            where the error is derivative of loss w.r.t a, the activation
+        '''
+        grad = error*self.activation.da_dz(a)
+        grad = np.moveaxis(grad, [0,1], [-2,-1])
+        for w,g in zip(self.local_weights,grad): #iterate over output depth
+            g = g.reshape(g.shape+(1,))
+            input_errors += ndi.correlate(g,w,mode='constant')
+        return grad
+        
+    def apply_grad(self,inputs,grad,scale=1.0):
+        '''
+        Calculates the derivative of the loss w.r.t. the weights (and bias) and adjusts weights.
+           
+        This is a gradient descent algorithm; could implement other methods here or in subclasses.
+        '''
+        self.biases -= scale*np.sum(grad,axis=(-2,-1))
+        for w,g in zip(self.local_weights,grad): #iterate over output depth
+            g = g.reshape(g.shape+(1,))
+            w -= scale*ndi.convolve(inputs,g,mode='constant')[:w.shape[0],:w.shape[1]]
+    
 class ConstantNet(NeuronNet):
     '''A NeuronNet that is not adjusted by backpropagation.'''
     def __init__(*args,**kwargs):
@@ -72,10 +109,12 @@ class ConstantNet(NeuronNet):
     def apply_grad(self,inputs,grad,scale=1.0):
         pass
     
+empty = np.asarray([],dtype=np.float64)
+    
 class ActivationNet(NeuronNet):
     '''A NeuronNet that only does activation (constant diagonal weights 1.0).'''
     def __init__(self,*args,**kwargs):
-        super().__init__(*args,init=np.asarray([],dtype=np.float64),**kwargs)
+        super().__init__(*args,init=(empty,empty),**kwargs)
         
     def activate(self,inputs):
         '''Calculates A = Activation(Inputs)'''
@@ -165,11 +204,13 @@ class Structure:
     
     def save_weights(self,inst,hf):
         for i,n in enumerate(inst.layer):
-            hf['neuron%i'%i] = n.weights
+            hf['neuron%i_w'%i] = n.weights
+            hf['neuron%i_b'%i] = n.biases
     
     def load_weights(self,inst,hf):
         for i,n in enumerate(inst.layer):
-            n.weights = hf['neuron%i'%i][:]
+            n.weights = hf['neuron%i_w'%i][:]
+            n.biases = hf['neuron%i_b'%i][:]
         
     def forward(self, inst, inputs):
         '''
@@ -322,7 +363,7 @@ class ResWrap(Structure):
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
-        inputs = inputs[inst.input_index].ravel()
+        inputs = inputs[0][inst.input_index].ravel()
         for n,g in zip(inst.layer,grads):
             n.apply_grad(inputs,g,scale=scale)
             
@@ -353,10 +394,61 @@ class Dense(Structure):
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
-        inputs = inputs[inst.input_index].ravel()
+        inputs = inputs[0][inst.input_index].ravel()
         for n,g in zip(inst.layer,grads):
             n.apply_grad(inputs,g,scale=scale)
     
+class Conv2D(Structure):
+    '''Convolves an input shape with a dense 2d kernel of neurons.
+       Can use multiple kernels to add a dimension to the output if out_shape is specified.'''
+    
+    def __init__(self, kernel_shape, out_shape=(), kernel_stride=None, activation=ReLU()):
+        self.activation = activation
+        assert len(kernel_shape) == 2, 'Must be a 2D convolution'
+        self.kernel_stride = tuple(kernel_stride) if kernel_stride is not None else None
+        self.kernel_shape = tuple(kernel_shape)
+        assert self.kernel_stride is None or len(self.kernel_shape) == len(self.kernel_stride), 'Kernel stride and shape must be same dimensionality'
+        self.out_shape = tuple(out_shape)
+        self.out_size = np.prod(self.out_shape,dtype=np.int64)
+        
+    def __call__(self,input_inst,input_index=0):
+        input_shape = input_inst.output_shapes[input_index]
+        conv_shape = tuple([in_dim//stride for in_dim, stride in zip(input_shape, self.kernel_stride)])
+        in_shape = input_shape[2:]
+        in_size = np.prod(in_shape,dtype=np.int64)
+        layer = [ConvNet(self.kernel_shape,in_size,self.out_size,self.activation)]
+        return Instance([input_inst], self, [input_shape], [conv_shape+self.out_shape], layer, input_index=input_index, in_shape=in_shape, in_size=in_size)
+        
+    def forward(self, inst, inputs):
+        '''inputs is at least dimensionality of kernel'''
+        inputs = inputs[0][inst.input_index]
+        inputs = inputs.reshape(inputs.shape[:2]+(inst.in_size,))
+        outputs = inst.layer[0].activate(inputs).reshape(inputs.shape[:2]+self.out_shape)
+        if self.kernel_stride is None:
+            return [outputs]
+        else:
+            return [outputs[::self.kernel_stride[0],::self.kernel_stride[1]]]
+            
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        inputs = inputs[0][inst.input_index]
+        inputs = inputs.reshape(inputs.shape[:2]+(inst.in_size,))
+        input_errors = input_errors[0][inst.input_index].reshape(inputs.shape[:2]+(inst.in_size,))
+        outputs = outputs[0].reshape(outputs[0].shape[:2]+(-1,))
+        error = error[0].reshape(error[0].shape[:2]+(-1,))
+        if self.kernel_stride is None:
+            return inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)
+        else:
+            unstrided_outputs = np.zeros(inputs.shape[:2]+(self.out_size,))
+            unstrided_error = np.zeros_like(unstrided_outputs)
+            unstrided_outputs[::self.kernel_stride[0],::self.kernel_stride[1],...] = outputs
+            unstrided_error[::self.kernel_stride[0],::self.kernel_stride[1],...] = error
+            return inst.layer[0].calculate_grad(inputs,input_errors,unstrided_outputs,unstrided_error)
+        
+    def backward_apply(self, inst, inputs, grads, scale=1.0):
+        inputs = inputs[0][inst.input_index]
+        inputs = inputs.reshape(inputs.shape[:2]+(inst.in_size,))
+        inst.layer[0].apply_grad(inputs,grads,scale=scale)
+            
 class Conv(Structure):
     '''Convolves an input shape with some dense kernel of neurons.
        Can use multiple kernels to add a dimension to the output if out_shape is specified.
@@ -391,27 +483,27 @@ class Conv(Structure):
         kernel = np.asarray(list(np.ndindex(*self.kernel_shape)))
         #for element in conv (conv_shape), these are the input (input_shape) indices to feed to neurons
         indexer = [tuple(np.asarray([np.asarray(c_index)*stride + ki for ki in kernel]).T) for c_index in np.ndindex(*conv_shape)]
-        return Instance([input_inst], self, [input_shape], [conv_shape+self.out_shape], layer, conv_shape=conv_shape, indexer=indexer,pad=pad,input_index=input_index)
+        return Instance([input_inst], self, [input_shape], [conv_shape+self.out_shape], layer, conv_shape=conv_shape, indexer=indexer, pad=pad, input_index=input_index)
         
     def forward(self, inst, inputs):
         '''inputs is at least dimensionality of kernel'''
         output = np.empty(np.prod(inst.output_shapes[inst.input_index],dtype=np.int32))
-        if inst.pad is None:
-            inputs = inputs[0][inst.input_index]
-        else:
+        if inst.pad is not None:
             inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
+        else:
+            inputs = inputs[0][inst.input_index]
         return  [ np.asarray([
                     inst.layer[0].activate(inputs[local_indexes].ravel()) for local_indexes in inst.indexer
                 ]).reshape(inst.output_shapes[0]) ]
             
     def backward_calc(self, inst, inputs, input_errors, outputs, error):
-        if inst.pad is None:
-            inputs = inputs[0][inst.input_index]
-            input_errors = input_errors[0][inst.input_index]
-        else:
+        if inst.pad is not None:
             inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
             prev_errors = input_errors[0][inst.input_index]
             input_errors = np.pad(input_errors[0][inst.input_index],inst.pad,constant_values=0)
+        else:
+            inputs = inputs[0][inst.input_index]
+            input_errors = input_errors[0][inst.input_index]
         conv_outputs = outputs[0].ravel()
         conv_error = error[0].ravel()
         grads = []
@@ -426,8 +518,12 @@ class Conv(Structure):
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
+        if inst.pad is not None:
+            inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
+        else:
+            inputs = inputs[0][inst.input_index]
         for local_indexes,g in zip(inst.indexer,grads):
-            local = inputs[inst.input_index][local_indexes].ravel()
+            local = inputs[local_indexes].ravel()
             inst.layer[0].apply_grad(local,g,scale=scale)
             
 class System:
@@ -565,10 +661,11 @@ class System:
     def calculate_grads(self,final_state,true_outputs,loss='quad'):
         errors = np.asarray([[np.zeros(s) for s in p.output_shapes] for p in self.parts],dtype=object)
         grads = np.asarray([None for p in self.parts],dtype=object)
+        outputs = [output[0] for output in final_state[self.output_indexes]]
         if loss == 'quad':
-            dloss_da = [final[0]-true for true,final in zip(true_outputs,final_state[self.output_indexes])]
+            dloss_da = [output-true for true,output in zip(true_outputs,outputs)]
         elif loss == 'ce': 
-            dloss_da = [true*(final[0]-1)+(1-true)*final[0] for true,final in zip(true_outputs,final_state[self.output_indexes])]
+            dloss_da = [true*((s:= sigmoid(output))-1)+(1-true)*s for true,output in zip(true_outputs,outputs)]
         else:
             raise Exception('Loss function ' + loss + ' not implemented')
             
@@ -615,5 +712,5 @@ class System:
         for i,grad in zip(range(len(self.parts)),grads):
             inst = self.parts[i]
             parent_indexes = self.parents_indexes[i]
-            inputs = final_state[parent_indexes][0] if len(parent_indexes) else None #What if there are multiple inputs!?
+            inputs = final_state[parent_indexes] if len(parent_indexes) else None #What if there are multiple inputs!?
             inst.structure.backward_apply(inst,inputs,grad,scale=scale)
