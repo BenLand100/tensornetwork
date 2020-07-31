@@ -5,12 +5,14 @@ from collections import deque
 class Instance:
     '''Represents collections of neurons as an input->output device with list of inputs and outputs'''
     
-    def __init__(self, parents, structure, input_shapes, output_shapes, layer, **kwargs):
+    def __init__(self, parents, structure, input_shapes, output_shapes, layer, constant=False, **kwargs):
         self.parents = parents
         self.structure = structure
+        self.name = type(self.structure).__name__
         self.input_shapes = input_shapes
         self.output_shapes = output_shapes
         self.layer = layer
+        self.constant = constant
         self.__dict__.update(kwargs)
     
     def save_weights(self,hf):
@@ -19,8 +21,11 @@ class Instance:
     def load_weights(self,hf):
         self.structure.load_weights(self,hf)
     
+    def forward(self,*args,**kwargs):
+        return self.structure.forward(self,*args,**kwargs)
+    
     def __str__(self):
-        return '%s :: %s -> %s'%(type(self.structure).__name__,self.input_shapes,self.output_shapes)
+        return '%s :: %s -> %s'%(self.name,self.input_shapes,self.output_shapes)
     
 class Structure:
     '''Represents specific types of neuron structures'''
@@ -87,19 +92,22 @@ class System:
     Contains logic for forward and back propagation, where neurons calculate their own errors.
     '''
     
-    def __init__(self,inputs=[],outputs=[]):
+    def __init__(self,inputs=[],outputs=[],verbose=True):
         self.inputs = inputs # input structures 
         self.outputs = outputs # output structures
         
         parts = [] # sequentially stores all instances in network
         children_indexes = [] # indexes of child instances in parts for each instance in parts
         parents_indexes = [] # indexes of parent instances in parts for each instance in parts
-            
+        constant_indexes = []
+        
         stack = deque()
         for child in self.outputs: # iterate over outputs to walk up tree
             if child not in parts:
                 child_index = len(parts)
                 parts.append(child)
+                if child.constant:
+                    constant_indexes.append(child_index)
                 children_indexes.append([])
                 parents_indexes.append([])
             else:
@@ -111,22 +119,26 @@ class System:
             if parent not in parts:
                 index = len(parts)
                 parts.append(parent)
+                if parent.constant:
+                    constant_indexes.append(index)
                 children_indexes.append([])
                 parents_indexes.append([])
             else:
                 index = parts.index(parent)
                 if child_index in children_indexes[index]:
                     continue #already mapped this branch
-            print(parent,'idx:',index,'=>',child,'idx:',child_index)
+            if verbose:
+                print(parent,'idx:',index,'=>',child,'idx:',child_index)
             parents_indexes[child_index].append(index)
             children_indexes[index].append(child_index)
             if parent.parents is not None:
                 for grandparent in parent.parents:
                     stack.append((index,parent,grandparent))
                 
-        self.input_indexes = np.asarray([parts.index(input) for input in self.inputs],dtype=np.int32) # indexes of input structures
-        self.output_indexes = np.asarray([parts.index(output) for output in self.outputs],dtype=np.int32) # indexes of output structures
         self.parts = np.asarray(parts,dtype=object)
+        self.input_indexes = np.asarray([parts.index(input) for input in self.inputs],dtype=np.int32) # indexes of input instances
+        self.output_indexes = np.asarray([parts.index(output) for output in self.outputs],dtype=np.int32) # indexes of output instances
+        self.constant_indexes = np.asarray(constant_indexes,dtype=np.int32) # indexes constant instances
         self.children_indexes = [np.asarray(child_indexes,dtype=np.int32) for child_indexes in children_indexes]
         self.parents_indexes = [np.asarray(parent_indexes,dtype=np.int32) for parent_indexes in parents_indexes]
         self.recompute_cache = {}
@@ -139,7 +151,7 @@ class System:
                 del hf[checkpoint] 
             checkpoint = hf.create_group(checkpoint)
             for i,part in enumerate(self.parts):
-                name = '%i_%s'%(i,type(part).__name__)
+                name = '%i_%s'%(i,part.name)
                 if name in checkpoint:
                     del checkpoint[name]
                 gr = checkpoint.create_group(name)
@@ -151,7 +163,7 @@ class System:
                 checkpoint = 'default'
             checkpoint = hf[checkpoint]   
             for i,part in enumerate(self.parts):
-                name = '%i_%s'%(i,type(part).__name__)
+                name = '%i_%s'%(i,part.name)
                 gr = checkpoint[name]
                 part.load_weights(gr)
         
@@ -177,7 +189,7 @@ class System:
             inputs = state[self.parents_indexes[index]]
             if np.any(inputs == None): 
                 continue #not ready yet
-            outputs = instance.structure.forward(instance,inputs)
+            outputs = instance.forward(inputs)
             #what about loops...
             state_changed[index] = True
             state[index] = outputs
@@ -188,6 +200,9 @@ class System:
         state = np.asarray([None for p in self.parts],dtype=object)
         changed[self.input_indexes] = True
         
+        for constant_index in zip(self.constant_indexes):
+            state[constant_index] = self.parts[constant_index].forward(None)
+            
         for input_index,input in zip(self.input_indexes,inputs):
             #assume inputs are slot 0 (no multi-input input structures)
             state[input_index] = [input]

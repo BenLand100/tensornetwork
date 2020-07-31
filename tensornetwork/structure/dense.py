@@ -21,12 +21,12 @@ class Dense(Structure):
         outputs = inst.layer[0].activate(inputs)
         return [outputs.reshape(inst.output_shapes[0])]
     
-    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+    def backward_calc(self, inst, inputs, input_errors, outputs, errors):
         inputs = inputs[0][inst.input_index].ravel()
         input_errors = input_errors[0][inst.input_index].ravel()
         outputs = outputs[0].ravel()
-        error = error[0].ravel()
-        grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)]
+        errors = errors[0].ravel()
+        grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,errors)]
         return grads
         
     def backward_apply(self, inst, inputs, grads, scale=1.0):
