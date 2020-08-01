@@ -1,6 +1,6 @@
 import numpy as np
 from ..network import Structure, Instance
-
+    
 class Flatten(Structure):
     '''Structure to flatten an input tensor'''
     

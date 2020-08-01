@@ -1,5 +1,6 @@
 import numpy as np
 from ..network import Structure, Instance
+from ..neuron import ActivationNet
 
 class Pointwise(Structure):
     '''Structure to concatenate two input tensors'''
@@ -45,3 +46,30 @@ class Mul(Pointwise):
     
     def oper_err(self,err,a,b):
         return b*err,a*err
+
+class Activate(Structure):
+
+    def __init__(self,activation):
+        self.activation = activation
+        
+    def __call__(self, input_inst, input_index=0):
+        shape = input_inst.output_shapes[input_index]
+        size = np.prod(shape)
+        layer = [ActivationNet(size,size,activation=self.activation)]
+        return Instance([input_inst],self,[shape],[shape],layer,input_index=input_index)
+        
+    def forward(self, inst, inputs):
+        inputs = inputs[0][inst.input_index].ravel()
+        outputs = inst.layer[0].activate(inputs)
+        return [outputs.reshape(inst.output_shapes[0])]
+    
+    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+        inputs = inputs[0][inst.input_index].ravel()
+        input_errors = input_errors[0][inst.input_index].ravel()
+        outputs = outputs[0].ravel()
+        error = error[0].ravel()
+        inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)
+        return None
+        
+    def backward_apply(self, inst, inputs, grads, scale=1.0):
+        pass

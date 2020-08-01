@@ -24,6 +24,12 @@ class Instance:
     def forward(self,*args,**kwargs):
         return self.structure.forward(self,*args,**kwargs)
     
+    def backward_calc(self,*args,**kwargs):
+        return self.structure.backward_calc(self,*args,**kwargs)
+    
+    def backward_apply(self,*args,**kwargs):
+        return self.structure.backward_apply(self,*args,**kwargs)
+    
     def __str__(self):
         return '%s :: %s -> %s'%(self.name,self.input_shapes,self.output_shapes)
     
@@ -141,7 +147,28 @@ class System:
         self.constant_indexes = np.asarray(constant_indexes,dtype=np.int32) # indexes constant instances
         self.children_indexes = [np.asarray(child_indexes,dtype=np.int32) for child_indexes in children_indexes]
         self.parents_indexes = [np.asarray(parent_indexes,dtype=np.int32) for parent_indexes in parents_indexes]
-        self.recompute_cache = {}
+        
+        evaluation_order = []
+        input_children = np.unique(np.concatenate([self.children_indexes[i] for i in self.input_indexes]))
+        not_evaluated  = np.ones_like(self.parts,dtype=np.bool)
+        not_evaluated[self.input_indexes] = False
+        not_evaluated[self.constant_indexes] = False
+        not_queued = np.ones_like(self.parts,dtype=np.bool)
+        not_queued[input_children] = False
+        recompute_queue = deque(input_children)
+        while len(recompute_queue) > 0:
+            index = recompute_queue.popleft()
+            not_queued[index] = True
+            inputs_not_evaluated = not_evaluated[self.parents_indexes[index]]
+            if np.any(inputs_not_evaluated): 
+                continue #not ready yet
+            evaluation_order.append(index)
+            not_evaluated[index] = False
+            children = self.children_indexes[index]
+            children = children[not_queued[children]]
+            not_queued[children] = False
+            recompute_queue.extend(children)
+        self.evaluation_order = np.asarray(evaluation_order,dtype=np.int32)
         
     def save_weights(self,fname,checkpoint=None):
         with h5py.File(fname,'a') as hf:
@@ -166,39 +193,9 @@ class System:
                 name = '%i_%s'%(i,part.name)
                 gr = checkpoint[name]
                 part.load_weights(gr)
-        
-    def finalize(self):
-        '''Prepares the system of neurons for calculations.'''
-        pass
-        
-    def _step(self,state_changed,state):
-        changed_indexes = np.nonzero(state_changed)[0]
-        state_changed = np.zeros_like(state_changed)
-
-        changed_indexes = frozenset(changed_indexes)
-        if changed_indexes in self.recompute_cache:
-            recompute_indexes = self.recompute_cache[changed_indexes]
-        else:
-            recompute_indexes = set()
-            for i in changed_indexes:
-                recompute_indexes.update(self.children_indexes[i])
-            #print('caching',changed_indexes,recompute_indexes)
-            self.recompute_cache[changed_indexes] = frozenset(recompute_indexes)
-        for index in recompute_indexes:
-            instance = self.parts[index]
-            inputs = state[self.parents_indexes[index]]
-            if np.any(inputs == None): 
-                continue #not ready yet
-            outputs = instance.forward(inputs)
-            #what about loops...
-            state_changed[index] = True
-            state[index] = outputs
-        return state_changed
     
     def guess(self,inputs,return_state=False):
-        changed = np.zeros(len(self.parts),dtype=np.bool)
         state = np.asarray([None for p in self.parts],dtype=object)
-        changed[self.input_indexes] = True
         
         for constant_index in zip(self.constant_indexes):
             state[constant_index] = self.parts[constant_index].forward(None)
@@ -206,12 +203,11 @@ class System:
         for input_index,input in zip(self.input_indexes,inputs):
             #assume inputs are slot 0 (no multi-input input structures)
             state[input_index] = [input]
-    
-        steps = 0
-        while np.count_nonzero(changed) > 0:
-            changed = self._step(changed,state)
-            steps = steps + 1
-            
+        
+        for index in self.evaluation_order:
+            inputs = state[self.parents_indexes[index]]
+            state[index] = self.parts[index].forward(inputs)
+
         outputs = [state[index][0] for index in self.output_indexes]
             
         if return_state:
@@ -240,29 +236,14 @@ class System:
         for output_index,output_loss in zip(self.output_indexes,dloss_da):
             #assume outputs are slot 0 (no multi-output output structures)
             errors[output_index][0] = output_loss
-         
-        not_propagated_mask = np.ones(len(self.parts),dtype=np.bool)
-        not_pending_mask = np.ones(len(self.parts),dtype=np.bool)
-        
-        stack = deque(self.output_indexes)
-        while len(stack) > 0:
-            index = stack.popleft()
-            not_pending_mask[index] = True
-            child_indexes = self.children_indexes[index]
-            if np.any(not_propagated_mask[child_indexes]):
-                continue # What about loops?
+            
+        for index in reversed(self.evaluation_order):
             parent_indexes = self.parents_indexes[index]
-            inputs = final_state[parent_indexes] if len(parent_indexes) else None
-            input_errors = errors[parent_indexes] if len(parent_indexes) else None
-            outputs = final_state[index]
-            instance = self.parts[index]
-            grads[index] = instance.structure.backward_calc(instance, inputs, input_errors, outputs, errors[index])
-            not_propagated_mask[index] = False
-            queue_up = not_pending_mask[parent_indexes]
-            queue_up = parent_indexes[queue_up]
-            not_pending_mask[queue_up] = False
-            stack.extend(queue_up)
-                
+            grads[index] = self.parts[index].backward_calc(
+                final_state[parent_indexes] if len(parent_indexes) else None,
+                errors[parent_indexes] if len(parent_indexes) else None,
+                final_state[index], errors[index])
+        
         return grads
     
     def apply_grads(self,final_state,grads,batch=False,scale=1.0):
@@ -281,4 +262,4 @@ class System:
             inst = self.parts[i]
             parent_indexes = self.parents_indexes[i]
             inputs = final_state[parent_indexes] if len(parent_indexes) else None #What if there are multiple inputs!?
-            inst.structure.backward_apply(inst,inputs,grad,scale=scale)
+            inst.backward_apply(inputs,grad,scale=scale)

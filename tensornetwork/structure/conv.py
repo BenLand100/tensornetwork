@@ -53,11 +53,12 @@ class Conv(Structure):
             inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
         else:
             inputs = inputs[0][inst.input_index]
+        nn = inst.layer[0]
         return  [ np.asarray([
-                    inst.layer[0].activate(inputs[local_indexes].ravel()) for local_indexes in inst.indexer
+                    nn.activate(inputs[local_indexes].ravel()) for local_indexes in inst.indexer
                 ]).reshape(inst.output_shapes[0]) ]
             
-    def backward_calc(self, inst, inputs, input_errors, outputs, error):
+    def backward_calc(self, inst, inputs, input_errors, outputs, errors):
         if inst.pad is not None:
             inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
             prev_errors = input_errors[0][inst.input_index]
@@ -66,14 +67,17 @@ class Conv(Structure):
             inputs = inputs[0][inst.input_index]
             input_errors = input_errors[0][inst.input_index]
         conv_outputs = outputs[0].ravel()
-        conv_error = error[0].ravel()
-        grads = []
-        for i,local_indexes in enumerate(inst.indexer):
-            local = inputs[local_indexes].ravel()
-            local_errors = input_errors[local_indexes].ravel()
-            output = conv_outputs[i*self.out_size:(i+1)*self.out_size]
-            error = conv_error[i*self.out_size:(i+1)*self.out_size]
-            grads.append(inst.layer[0].calculate_grad(local,local_errors,output,error))
+        conv_errors = errors[0].ravel()
+        nn = inst.layer[0]
+        grads = [nn.calculate_grad(
+                        inputs[local_indexes].ravel(),
+                        input_errors[local_indexes].ravel(),
+                        output,
+                        error)
+                    for output,error,local_indexes in zip(
+                        np.split(conv_outputs,len(conv_outputs)/self.out_size),
+                        np.split(conv_errors,len(conv_errors)/self.out_size),
+                        inst.indexer) ]
         if inst.pad is not None:
             prev_errors[:] = unpad(input_errors,inst.pad)
         return grads

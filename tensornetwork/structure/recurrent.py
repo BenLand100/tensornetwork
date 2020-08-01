@@ -1,10 +1,10 @@
 import numpy as np
-from .pointwise import Add, Mul
+from .pointwise import Activate, Add, Mul
 from .tensor_ops import FlatConcat, Split, Join, Combine
 from .dense import Dense
 from .input import Constant
 from ..network import Structure, Instance
-from ..activation import Tanh
+from ..activation import Tanh,Sigmoid
 from ..neuron import ActivationNet
 
 class Clone(Structure):
@@ -33,6 +33,7 @@ class Clone(Structure):
         return inst
     
 class RNN(Structure):
+    ''' A recurrent Dense block applied over the first dimension of the input. '''
 
     def __init__(self,size,activation=Tanh):
         self.size = size
@@ -59,27 +60,46 @@ class RNN(Structure):
             out_insts.append(rnn_state)
         join_inst = Join()(out_insts)
         return Combine()([join_inst,rnn_state])
-
-'''
-        return Instance([input_inst,rnn_state],self,
-                        [input_shape,(self.size,)],
-                        [(slices,self.size),(self.size,)],
-                        layer,input_index=input_index,state_index=state_index)
-
-    def forward(self, inst, inputs):
-        input_series = inputs[0][inst.input_index]
-        input_state = inputs[1][inst.state_index].flatten()
-        output = []
-        for input_slice in input_series:
-            rnn_input = np.concatenate([input_state,input_slice.flatten()])
-            rnn_output = inst.layer[0].activate(rnn_input)
-            input_state = rnn_output
-            output.append(rnn_output)
-        return [np.asarray(output),rnn_output]
     
-    def backward_calc(self, inst, inputs, input_errors, outputs, errors):
-        pass
+class LSTM(Structure):
+    ''' A recurrent LSTM block applied over the first dimension of the input. '''
+
+    def __init__(self,size,activation=Tanh):
+        self.size = size
+        self.activation = activation
         
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
-        pass
-'''
+    def __call__(self, input_inst, state_inst=None, mem_inst=None, input_index=0, state_index=0, mem_index=0):
+        input_shape = input_inst.output_shapes[input_index]
+        slices = input_shape[0]
+        slice_size = np.prod(input_shape[1:])
+        split_inst = Split()(input_inst)
+        if state_inst is None:
+            state_inst = Constant(np.zeros(self.size))()
+            state_index = 0
+        if mem_inst is None:
+            mem_inst = Constant(np.zeros(self.size))()
+            mem_index = 0
+        out_insts = []
+        forget_gate = Clone(Dense((self.size,),activation=Sigmoid()))
+        learn_gate = Clone(Dense((self.size,),activation=Sigmoid()))
+        info_layer = Clone(Dense((self.size,),activation=Tanh()))
+        release_gate = Clone(Dense((self.size,),activation=Sigmoid()))
+        reweight = Activate(activation=Tanh())
+        for i in range(slices):
+            concat_inst = FlatConcat()([state_inst,split_inst],input_indexes=[state_index,i])
+            forget_inst = forget_gate(concat_inst)
+            learn_inst = learn_gate(concat_inst)
+            info_inst = info_layer(concat_inst)
+            release_inst = release_gate(concat_inst)
+            pruned_inst = Mul()([mem_inst,forget_inst])
+            next_mem_inst = Add()([pruned_inst,info_inst])
+            reweight_inst = reweight(next_mem_inst)
+            next_state_inst = Mul()([reweight_inst,release_inst])
+            mem_inst = next_mem_inst
+            mem_index = 0
+            state_inst = next_state_inst
+            state_index = 0
+            out_insts.append(state_inst)
+        join_inst = Join()(out_insts)
+        return Combine()([join_inst,state_inst,mem_inst])
+
