@@ -34,7 +34,7 @@ class ResWrap(Structure):
         grads = [inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)]
         return grads
         
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
+    def backward_apply(self, inst, inputs, grads, **kwargs):
         inputs = inputs[0][inst.input_index].ravel()
         for n,g in zip(inst.layer,grads):
-            n.apply_grad(inputs,g,scale=scale)
+            n.apply_grad(inputs,g,**kwargs)

@@ -20,6 +20,9 @@ class NeuronNet:
             self.biases = np.zeros(noutputs)
         else:
             self.weights,self.biases = init
+        self.m = 0
+        self.v = 0
+        self.t = 0
         
     def activate(self,inputs):
         '''Calculates A = Activation(Weights • Inputs + Bias)'''
@@ -34,14 +37,26 @@ class NeuronNet:
         input_errors += np.matmul(self.weights.T,grad)
         return grad
         
-    def apply_grad(self,inputs,grad,scale=1.0):
+    def apply_grad(self,inputs,grad,scale=1e-3,method=None,b1=0.9,b2=0.999,epsilon=1e-8):
         '''
         Calculates the derivative of the loss w.r.t. the weights (and bias) and adjusts weights.
            
+
         This is a gradient descent algorithm; could implement other methods here or in subclasses.
         '''
-        self.biases -= scale*grad
-        self.weights -= scale*np.outer(grad,inputs)
+        if method is None:
+            self.biases -= scale*grad
+            self.weights -= scale*np.outer(grad,inputs)
+        elif method == 'adam':
+            g = np.hstack([grad.reshape(len(grad),1),np.outer(grad,inputs)])
+            self.m = b1 * self.m + (1 - b1) * g
+            self.v = b2 * self.v + (1 - b2) * np.square(g)
+            self.t += 1
+            mp = self.m / (1 - np.power(b1, self.t))
+            vp = self.v / (1 - np.power(b2, self.t))
+            s = scale * mp / (np.sqrt(vp) + epsilon)
+            self.biases -= s[:,0]
+            self.weights -= s[:,1:]
         
 class ConstantNet(NeuronNet):
     '''A NeuronNet that is not adjusted by backpropagation.'''
@@ -52,7 +67,7 @@ class ConstantNet(NeuronNet):
     def calculate_grad(self, inputs, input_errors, a, error):
         return None
         
-    def apply_grad(self,inputs,grad,scale=1.0):
+    def apply_grad(self,inputs,grad,**kwargs):
         pass
     
 empty = np.asarray([],dtype=np.float64)
@@ -69,7 +84,7 @@ class ActivationNet(NeuronNet):
     def calculate_grad(self, inputs, input_errors, a, error):
         return None
         
-    def apply_grad(self,inputs,grad,scale=1.0):
+    def apply_grad(self,inputs,grad,**kwargs):
         pass
         
 class Conv2DNet(NeuronNet):
@@ -105,7 +120,7 @@ class Conv2DNet(NeuronNet):
             input_errors += ndi.correlate(g,w,mode='constant')
         return grad
         
-    def apply_grad(self,inputs,grad,scale=1.0):
+    def apply_grad(self,inputs,grad,scale=1.0,**kwargs):
         '''
         Calculates the derivative of the loss w.r.t. the weights (and bias) and adjusts weights.
            

@@ -82,11 +82,11 @@ class Conv(Structure):
             prev_errors[:] = unpad(input_errors,inst.pad)
         return grads
         
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
+    def backward_apply(self, inst, inputs, grads, **kwargs):
         if inst.pad is not None:
             inputs = np.pad(inputs[0][inst.input_index],inst.pad,constant_values=0)
         else:
             inputs = inputs[0][inst.input_index]
         for local_indexes,g in zip(inst.indexer,grads):
             local = inputs[local_indexes].ravel()
-            inst.layer[0].apply_grad(local,g,scale=scale)
+            inst.layer[0].apply_grad(local,g,**kwargs)

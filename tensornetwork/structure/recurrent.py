@@ -35,7 +35,7 @@ class Clone(Structure):
 class RNN(Structure):
     ''' A recurrent Dense block applied over the first dimension of the input. '''
 
-    def __init__(self,size,activation=Tanh):
+    def __init__(self,size,activation=Tanh()):
         self.size = size
         self.activation = activation
         
@@ -64,9 +64,9 @@ class RNN(Structure):
 class LSTM(Structure):
     ''' A recurrent LSTM block applied over the first dimension of the input. '''
 
-    def __init__(self,size,activation=Tanh):
+    def __init__(self,size,go_backwards=False):
         self.size = size
-        self.activation = activation
+        self.go_backwards = go_backwards
         
     def __call__(self, input_inst, state_inst=None, mem_inst=None, input_index=0, state_index=0, mem_index=0):
         input_shape = input_inst.output_shapes[input_index]
@@ -85,7 +85,7 @@ class LSTM(Structure):
         info_layer = Clone(Dense((self.size,),activation=Tanh()))
         release_gate = Clone(Dense((self.size,),activation=Sigmoid()))
         reweight = Activate(activation=Tanh())
-        for i in range(slices):
+        for i in (reversed(range(slices)) if self.go_backwards else range(slices)):
             concat_inst = FlatConcat()([state_inst,split_inst],input_indexes=[state_index,i])
             forget_inst = forget_gate(concat_inst)
             learn_inst = learn_gate(concat_inst)

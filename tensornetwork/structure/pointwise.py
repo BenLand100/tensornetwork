@@ -70,6 +70,3 @@ class Activate(Structure):
         error = error[0].ravel()
         inst.layer[0].calculate_grad(inputs,input_errors,outputs,error)
         return None
-        
-    def backward_apply(self, inst, inputs, grads, scale=1.0):
-        pass

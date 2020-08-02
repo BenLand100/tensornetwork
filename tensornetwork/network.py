@@ -81,12 +81,11 @@ class Structure:
         '''
         pass
     
-    def backward_apply(self, inst, inputs, grads, scale=1e-2):
+    def backward_apply(self, inst, inputs, grads, **kwargs):
         '''
         inst is the result of a __call__ on this object
         inputs[parent][slot] is parent `forward` calculation outputs
         grads is the result of `backward_calc`
-        scale is the learning rate to scale neuron weight updates by
         '''
         pass
         
@@ -98,7 +97,7 @@ class System:
     Contains logic for forward and back propagation, where neurons calculate their own errors.
     '''
     
-    def __init__(self,inputs=[],outputs=[],verbose=True):
+    def __init__(self,inputs=[],outputs=[],verbose=False):
         self.inputs = inputs # input structures 
         self.outputs = outputs # output structures
         
@@ -169,6 +168,8 @@ class System:
             not_queued[children] = False
             recompute_queue.extend(children)
         self.evaluation_order = np.asarray(evaluation_order,dtype=np.int32)
+        if verbose:
+            print(self.evaluation_order)
         
     def save_weights(self,fname,checkpoint=None):
         with h5py.File(fname,'a') as hf:
@@ -194,7 +195,7 @@ class System:
                 gr = checkpoint[name]
                 part.load_weights(gr)
     
-    def guess(self,inputs,return_state=False):
+    def guess(self,inputs,return_state=False,verbose=False):
         state = np.asarray([None for p in self.parts],dtype=object)
         
         for constant_index in zip(self.constant_indexes):
@@ -206,6 +207,8 @@ class System:
         
         for index in self.evaluation_order:
             inputs = state[self.parents_indexes[index]]
+            if verbose:
+                print(self.parts[index])
             state[index] = self.parts[index].forward(inputs)
 
         outputs = [state[index][0] for index in self.output_indexes]
@@ -215,12 +218,12 @@ class System:
         else:
             return outputs
     
-    def learn(self,final_state,true_outputs,scale=1.0,batch=False,loss='quad'):
+    def learn(self,final_state,true_outputs,batch=False,loss='quad',**kwargs):
         grads = self.calculate_grads(final_state,true_outputs,loss=loss)
         if batch:
             return grads
         else:
-            self.apply_grads(final_state,grads,batch=False,scale=scale)
+            self.apply_grads(final_state,grads,batch=False,**kwargs)
     
     def calculate_grads(self,final_state,true_outputs,loss='quad'):
         errors = np.asarray([[np.zeros(s) for s in p.output_shapes] for p in self.parts],dtype=object)
@@ -246,7 +249,7 @@ class System:
         
         return grads
     
-    def apply_grads(self,final_state,grads,batch=False,scale=1.0):
+    def apply_grads(self,final_state,grads,batch=False,**kwargs):
         '''In principle you could average many grads (batch = True) from many trials to find a better gradient.
            In practice, don't. Online training is better.'''
         if batch:
@@ -262,4 +265,4 @@ class System:
             inst = self.parts[i]
             parent_indexes = self.parents_indexes[i]
             inputs = final_state[parent_indexes] if len(parent_indexes) else None #What if there are multiple inputs!?
-            inst.backward_apply(inputs,grad,scale=scale)
+            inst.backward_apply(inputs,grad,**kwargs)

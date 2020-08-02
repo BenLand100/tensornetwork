@@ -8,16 +8,16 @@ class Flatten(Structure):
         pass
     
     def __call__(self,input_inst, input_index=0):
-        input_shape = input_inst.output_shape[input_index]
+        input_shape = input_inst.output_shapes[input_index]
         output_shape = (np.prod(input_shape),)
         return Instance([input_inst],self,[input_shape],[output_shape],[],input_index=input_index)
     
     def forward(self, inst, inputs):
-        return np.flatten(inputs[inst.input_index])
+        return [inputs[0][inst.input_index].ravel()]
         
     def backward_calc(self, inst, inputs, input_errors, outputs, errors):
-        input_error = input_errors[inst.input_index]
-        input_error[:] = errors[0].rehsape(input_error.shape)
+        input_error = input_errors[0][inst.input_index]
+        input_error[:] = errors[0].reshape(input_error.shape)
     
 
 class Concatenate(Structure):
@@ -70,7 +70,7 @@ class FlatConcat(Structure):
         return Instance(input_inst_list,self,input_shapes,[output_shape],[],input_indexes=input_indexes,splitter=splitter)
     
     def forward(self, inst, inputs):
-        inputs = [input[index].flatten() for input,index in zip(inputs,inst.input_indexes)]
+        inputs = [input[index].ravel() for input,index in zip(inputs,inst.input_indexes)]
         return [np.concatenate(inputs)]
         
     def backward_calc(self, inst, inputs, input_errors, outputs, errors):
