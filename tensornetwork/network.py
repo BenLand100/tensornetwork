@@ -232,7 +232,7 @@ class System:
         if loss == 'quad':
             dloss_da = [output-true for true,output in zip(true_outputs,outputs)]
         elif loss == 'ce': 
-            dloss_da = [true*((s:= sigmoid(output))-1)+(1-true)*s for true,output in zip(true_outputs,outputs)]
+            dloss_da = [true*((s:= output)-1)+(1-true)*s for true,output in zip(true_outputs,outputs)]
         else:
             raise Exception('Loss function ' + loss + ' not implemented')
             

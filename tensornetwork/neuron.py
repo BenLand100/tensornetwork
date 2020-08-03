@@ -22,6 +22,8 @@ class NeuronNet:
             self.weights,self.biases = init
         self.m = 0
         self.v = 0
+        self.mb = 0
+        self.vb = 0
         self.t = 0
         
     def activate(self,inputs):
@@ -44,19 +46,29 @@ class NeuronNet:
 
         This is a gradient descent algorithm; could implement other methods here or in subclasses.
         '''
-        if method is None:
+        if method is None or method == 'sgd':
             self.biases -= scale*grad
             self.weights -= scale*np.outer(grad,inputs)
         elif method == 'adam':
-            g = np.hstack([grad.reshape(len(grad),1),np.outer(grad,inputs)])
+            gb = grad
+            self.mb = b1 * self.mb + (1 - b1) * gb
+            self.vb = b2 * self.vb + (1 - b2) * np.square(gb)
+            g = np.outer(grad,inputs)
             self.m = b1 * self.m + (1 - b1) * g
             self.v = b2 * self.v + (1 - b2) * np.square(g)
-            self.t += 1
-            mp = self.m / (1 - np.power(b1, self.t))
-            vp = self.v / (1 - np.power(b2, self.t))
-            s = scale * mp / (np.sqrt(vp) + epsilon)
-            self.biases -= s[:,0]
-            self.weights -= s[:,1:]
+            if self.t < 1e4:
+                self.t += 1
+                mbp = self.mb / (1 - np.power(b1, self.t))
+                vbp = self.vb / (1 - np.power(b2, self.t))
+                mp = self.m / (1 - np.power(b1, self.t))
+                vp = self.v / (1 - np.power(b2, self.t))
+            else:
+                mbp = self.mb
+                vbp = self.vb
+                mp = self.m
+                vp = self.v
+            self.biases -= scale * mbp / (np.sqrt(vbp) + epsilon)
+            self.weights -= scale * mp / (np.sqrt(vp) + epsilon)
         
 class ConstantNet(NeuronNet):
     '''A NeuronNet that is not adjusted by backpropagation.'''
