@@ -56,7 +56,7 @@ class NeuronNet:
             g = np.outer(grad,inputs)
             self.m = b1 * self.m + (1 - b1) * g
             self.v = b2 * self.v + (1 - b2) * np.square(g)
-            if self.t < 1e4:
+            if self.t < 1e5:
                 self.t += 1
                 mbp = self.mb / (1 - np.power(b1, self.t))
                 vbp = self.vb / (1 - np.power(b2, self.t))
